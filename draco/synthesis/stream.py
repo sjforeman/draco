@@ -84,6 +84,7 @@ class SimulateSidereal(task.SingleTask):
             raise RuntimeError('Frequencies in map do not match those in Beam Transfers.')
 
         # Calculate the alm's for the local sections
+        self.log.debug("SHTing maps")
         row_alm = hputil.sphtrans_sky(row_map, lmax=lmax).reshape((lfreq, npol * (lmax + 1), lmax + 1))
 
         # Trim off excess m's and wrap into MPIArray
@@ -105,6 +106,7 @@ class SimulateSidereal(task.SingleTask):
         # Iterate over m's local to this process and generate the corresponding
         # visibilities
         for mp, mi in vis_data.enumerate(axis=0):
+            self.log.debug("Projecting alm->vis for m=%i (local %i/%i", mi, mp, vis_data.local_shape[0])
             vis_data[mp] = bt.project_vector_sky_to_telescope(mi, col_alm[mp].view(np.ndarray))
 
         # Rearrange axes such that frequency is last (as we want to divide

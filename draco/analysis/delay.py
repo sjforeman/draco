@@ -147,7 +147,7 @@ class DelaySpectrumEstimator(task.SingleTask):
         for lbi, bi in delay_spec.spectrum[:].enumerate(axis=0):
 
             self.log.debug("Delay transforming baseline %i/%i",
-                           bi, len(baselines))
+                    bi, delay_spec.spectrum.local_shape[0])
 
             data = vis_I[lbi].view(np.ndarray).T
             weight = vis_weight[lbi].view(np.ndarray)
