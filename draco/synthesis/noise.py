@@ -186,12 +186,12 @@ class GaussianNoise(task.SingleTask):
 
         Parameters
         ----------
-        data_exp : :class:`containers.SiderealStream` or :class:`containers.TimeStream`
+        data : :class:`containers.SiderealStream` or :class:`containers.TimeStream`
             The expected (i.e. noiseless) visibility dataset.
 
         Returns
         -------
-        data_noise : same as :param:`data_exp`
+        data_noise : same as :param:`data`
             The sampled (i.e. noisy) visibility dataset.
         """
 
@@ -203,6 +203,7 @@ class GaussianNoise(task.SingleTask):
         nfeed = len(data.index_map['input'])
 
         nprod = len(data.index_map['prod'])
+
         # Get a reference to the base MPIArray. Attempting to do this in the
         # loop fails if not all ranks enter the loop (as there is an implied MPI
         # Barrier)
@@ -210,7 +211,7 @@ class GaussianNoise(task.SingleTask):
 
         # Get the time interval
         if isinstance(data, containers.SiderealStream):
-            dt = 240 * (data.ra[1] - data_exp.ra[0]) * STELLAR_S
+            dt = 240 * (data.ra[1] - data.ra[0]) * STELLAR_S
             ntime = data.index_map['ra'].size
         else:
             dt = data.time[1] - data.time[0]
@@ -229,12 +230,12 @@ class GaussianNoise(task.SingleTask):
             for lfi, fi in vis_data.enumerate(0):
 
                 # Get the frequency interval
-                df = data_exp.index_map['freq']['width'][fi] * 1e6
+                df = data.index_map['freq']['width'][fi] * 1e6
 
                 # Calculate the number of samples
                 std = self.tsys / (self.sample_frac * dt * df)**0.5
 
-                data.vis[lfi] += std * nputil.complex_standard_normal(nprod, ntime) / 2**0.5
+                vis_data[lfi] += std * nputil.complex_std_normal((nprod, ntime)) / 2**0.5
 
                 # Construct and set the correct weights in place
                 if self.set_weights:
