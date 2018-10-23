@@ -7,7 +7,7 @@ all be moved out into their own module.
 
 import numpy as np
 
-from caput import config, mpiutil
+from caput import config, mpiutil, pipeline
 
 from ..core import task, containers
 from ..util import tools
@@ -118,3 +118,60 @@ class ApplyGain(task.SingleTask):
             tstream.weight[:] *= gain_weight[:, np.newaxis, :]
 
         return tstream
+
+
+class CreateProductManager(pipeline.TaskBase):
+    """Create a ProductManager from given configuration.
+
+    The configuration parameters are equivalent to the sections in the
+    driftscan config files, except `generate` which will make the full
+    products be generated.
+
+    Attributes
+    ----------
+    config : dict, optional
+        Config options. If not set not generate any products is assumed.
+    telescope : dict
+        Telescope setup options.
+    kltransform : dict, optional
+        Configure KL generation.
+    psfisher : dict, optional
+        Configure PS eatimation.
+    generate : bool, optional
+    """
+
+    globalconfig = config.Property(key='config', proptype=dict)
+    telescope = config.Property(proptype=dict)
+    kltransform = config.Property(proptype=dict)
+    psfisher = config.Property(proptype=dict)
+    generate = config.Property(proptype=bool, default=False)
+
+    def setup(self):
+        """Create a Product Manager."""
+
+        from drift.core.manager import ProductManager
+
+        def ensure_dict(x):
+            return {} if x is None else x
+
+        conf = {
+            'config': ensure_dict(self.globalconfig),
+            'telescope': ensure_dict(self.telescope),
+            'kltransform': ensure_dict(self.kltransform),
+            'psfisher': ensure_dict(self.psfisher)
+        }
+
+        if 'output_directory' not in conf['config']:
+            conf['config']['output_directory'] = '/tmp'
+
+            if self.generate:
+                raise RuntimeError('Must explicitly set an output directory for'
+                                   'product generation. Skipping.')
+
+        m = ProductManager()
+        m.apply_config(conf)
+
+        if self.generate:
+            m.generate()
+
+        return m
