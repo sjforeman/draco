@@ -20,6 +20,7 @@ import contextlib
 import numpy as np
 
 from caput import config
+from cora.util import nputil
 
 from ..core import task, containers
 from ..util import tools
@@ -134,6 +135,98 @@ class GaussianNoise(task.SingleTask):
 
         return data
 
+
+class GaussianNoiseAlt(task.SingleTask):
+    """Add properly distributed noise to a visibility dataset.
+
+    This task draws properly (complex Wishart) distributed samples from an input
+    visibility dataset which is assumed to represent the expectation.
+
+    See http://link.springer.com/article/10.1007%2Fs10440-010-9599-x for a
+    discussion of the Bartlett decomposition for complex Wishart distributed
+    quantities.
+
+    Attributes
+    ----------
+    sample_frac : float
+        Multiplies the number of samples in each measurement. For instance this
+        could be a duty cycle if the correlator was not keeping up, or could be
+        larger than one if multiple measurements were combined.
+    seed : int
+        Random seed for the noise generation.
+    set_weights : bool
+        Set the weights to the appropriate values.
+    """
+
+    ndays = config.Property(proptype=float, default=1.0)
+    seed = config.Property(proptype=int, default=None)
+    set_weights = config.Property(proptype=bool, default=True)
+    recv_temp = config.Property(proptype=float)
+
+    def setup(self, telescope):
+        from ..core import io
+        self.telescope = io.get_telescope(telescope)
+
+    def process(self, data):
+        """Generate a noisy dataset.
+
+        Parameters
+        ----------
+        data : :class:`containers.SiderealStream` or :class:`containers.TimeStream`
+            The expected (i.e. noiseless) visibility dataset.
+
+        Returns
+        -------
+        data_noise : same as :param:`data`
+            The sampled (i.e. noisy) visibility dataset.
+        """
+
+        from caput.time import STELLAR_S
+        from ..util import _fast_tools
+
+        data.redistribute('freq')
+
+        nfeed = len(data.index_map['input'])
+
+        nprod = len(data.index_map['prod'])
+        # Get a reference to the base MPIArray. Attempting to do this in the
+        # loop fails if not all ranks enter the loop (as there is an implied MPI
+        # Barrier)
+        vis_data = data.vis[:]
+
+        # Get the time interval
+        if isinstance(data, containers.SiderealStream):
+            dt = 240 * (data.ra[1] - data.ra[0]) * STELLAR_S
+            ntime = data.index_map['ra'].size
+        else:
+            dt = data.time[1] - data.time[0]
+            ntime = data.index_map['time'].size
+
+        if nprod == nfeed * (nfeed + 1) / 2:
+            redundancy = np.ones(nprod)
+        elif nprod == self.telescope.nbase:
+            redundancy = self.telescope.redundancy
+        else:
+            raise ValueError("Strange number of products in the input.")
+
+        with mpi_random_seed(self.seed):
+
+            # Iterate over frequencies
+            for lfi, fi in vis_data.enumerate(0):
+
+                # Get the frequency interval
+                df = data.index_map['freq']['width'][fi] * 1e6
+
+                # Calculate the number of samples
+                std = self.recv_temp / (self.ndays * dt * df * redundancy[:, np.newaxis])**0.5
+
+                data.vis[fi] += std * nputil.complex_std_normal((nprod, ntime))
+
+                # Construct and set the correct weights in place
+                if self.set_weights:
+                    data.weight[fi] = 1.0 / std**2
+
+        return data
 
 class SampleNoise(task.SingleTask):
     """Add properly distributed noise to a visibility dataset.
