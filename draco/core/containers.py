@@ -629,6 +629,87 @@ class SiderealStream(ContainerBase):
         return self.index_map["stack"]["conjugate"]
 
 
+class SystemSensitivity(TODContainer):
+    """A container for holding a sensitivity dataset in time.
+
+    This should be averaged/collapsed in the stack/prod axis
+    to provide an overall summary of the system sensitivity.
+    Two datasets are available: the measured noise and the
+    estimated noise from the visibility weights.
+    """
+
+    _axes = ('freq', 'pol', 'time')
+
+    _dataset_spec = {
+        'sigma': {
+            'axes': ['freq', 'pol', 'time'],
+            'dtype': np.float32,
+            'initialise': True,
+            'distributed': False
+        },
+
+        'sigma_estimate': {
+            'axes': ['freq', 'pol', 'time'],
+            'dtype': np.float32,
+            'initialise': True,
+            'distributed': False
+        },
+
+        'weight': {
+            'axes': ['freq', 'pol', 'time'],
+            'dtype': np.float32,
+            'initialise': True,
+            'distributed': False
+        }
+    }
+
+    @property
+    def sigma(self):
+        return self.datasets['sigma']
+
+    @property
+    def estimate(self):
+        return self.datasets['sigma_estimate']
+
+    @property
+    def weight(self):
+        return self.datasets['weight']
+
+    @property
+    def freq(self):
+        return self.index_map['freq']['centre']
+
+    @property
+    def pol(self):
+        return self.index_map['pol']
+
+
+class RFIMask(TODContainer):
+    """A container for holding RFI mask.
+
+    """
+
+    _axes = ('freq', 'time')
+
+    _dataset_spec = {
+        'mask': {
+            'axes': ['freq', 'time'],
+            'dtype': bool,
+            'initialise': True,
+            'distributed': False,
+            'distributed_axis': 'freq'
+        }
+    }
+
+    @property
+    def mask(self):
+        return self.datasets['mask']
+
+    @property
+    def freq(self):
+        return self.index_map['freq']['centre']
+
+
 class TimeStream(TODContainer):
     """A container for holding a visibility dataset in time.
 
