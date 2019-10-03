@@ -3,8 +3,8 @@
 import numpy as np
 from scipy.ndimage import convolve1d
 
-def sumthreshold_py(data, max_m=16, start_flag=None, threshold1=None, remove_median=True):
-    
+def sumthreshold_py(data, max_m=16, start_flag=None, threshold1=None, remove_median=True, correct_for_missing=True):
+
     m_min = 4  # Minimum value of m to reach
     data = np.copy(data)
     (ny, nx) = data.shape
@@ -25,7 +25,7 @@ def sumthreshold_py(data, max_m=16, start_flag=None, threshold1=None, remove_med
         else:
             threshold = threshold1/1.5**(np.log2(m))
         data_rms = np.std(data[~flag])
-        print(threshold, data_rms, threshold / data_rms)
+#        print(threshold, data_rms, threshold / data_rms)
 #        if (m > m_min) and (threshold < 2.* data_rms):
 #            break
 
@@ -43,6 +43,8 @@ def sumthreshold_py(data, max_m=16, start_flag=None, threshold1=None, remove_med
         dconv = convolve1d(data, weights=np.ones(m, dtype=float), origin=-centre, axis=1)[:, :(nx-m+1)]
         # Convolution of the counts
         cconv = convolve1d(count, weights=np.ones(m, dtype=float), origin=-centre, axis=1)[:, :(nx-m+1)]
+        if correct_for_missing:
+            cconv = m**0.5 * cconv**0.5
         flag_temp = (dconv > cconv * threshold)
         flag_temp += (dconv < -cconv * threshold)
         for ii in range(flag_temp.shape[1]):
@@ -55,6 +57,8 @@ def sumthreshold_py(data, max_m=16, start_flag=None, threshold1=None, remove_med
         dconv = convolve1d(data, weights=np.ones(m, dtype=float), origin=-centre, axis=0)[:(ny-m+1), :]
         # Convolution of the counts
         cconv = convolve1d(count, weights=np.ones(m, dtype=float), origin=-centre, axis=0)[:(ny-m+1), :]
+        if correct_for_missing:
+            cconv = m**0.5 * cconv**0.5
         flag_temp = (dconv > cconv * threshold)
         flag_temp += (dconv < -cconv * threshold)
         for ii in range(flag_temp.shape[0]):
