@@ -28,9 +28,12 @@ import numpy as np
 from scipy.ndimage import median_filter, uniform_filter
 
 from caput import config, weighted_median
+from ch_util import rfi, ephemeris
+from ch_util.tools import invert_no_zero
 
 from ..core import task, containers, io
 from ..util import tools
+from ..util import rfi as dracorfi
 
 
 class DayMask(task.SingleTask):
@@ -400,6 +403,205 @@ class ThresholdVisWeight(task.SingleTask):
         timestream.weight[:] = np.where(keep, weight, 0.0)
 
         return timestream
+
+
+class RFISensitivityMask(task.SingleTask):
+    """Slightly less crappy RFI masking.
+
+    Attributes
+    ----------
+    sigma : float, optional
+        The false positive rate of the flagger given as sigma value assuming
+        the non-RFI samples are Gaussian.
+        Used for the MAD and TV station flaggers.
+    tv_fraction : float, optional
+        Number of bad samples in a digital TV channel that cause the whole
+        channel to be flagged.
+    max_m : int, optional
+        Maximum size of the Sumthreshold window to use.
+        The default (8) seems to work well with sensitivity data.
+    threshold_sigma : float, optional
+        The desired threshold for the Sumthreshold algorythm at the
+        final window size (determined by max m) given as a 
+        number of standard deviations (to be estimated from the 
+        sensitivity map excluding weight and static masks).
+        The default (8) seems to work well with sensitivity data
+        using the default max_m.
+    remove_median : bool, optional
+        Remove median accross times for each frequency?
+        Recomended. Default: True.
+    sir : bool, optional
+        Apply scale invariant rank (SIR) operator on top of final mask?
+        We find that this is advisable while we still haven't flagged 
+        out all the static bands properly. Default: True.
+    mask_type : string, optional
+        One of 'mad', 'sumthreshold' or 'combine'.
+        Default is combine, which uses the sumthreshold everywhere
+        except around the transits of the Sun, CasA and CygA where it
+        applies the MAD mask to avoid masking out the transits.
+    """
+
+    sigma = config.Property(proptype=float, default=5.0)
+    tv_fraction = config.Property(proptype=float, default=0.5)
+    max_m = config.Property(proptype=int, default=8)
+    start_threshold_sigma = config.Property(proptype=float, default=8)
+    remove_median = config.Property(proptype=bool, default=True)
+    sir = config.Property(proptype=bool, default=True)
+    mask_type = config.enum(["mad", "sumthreshold", "combine"], default="combine")
+
+    MADTORMS = 1.4826  # Conver MAD to RMS
+    # The difference between the exponents in the usual
+    # scaling of the RMS (n**0.5) and the scaling used
+    # in the sumthreshold algorythm (n**log2(1.5))
+    RMS_SCALING_DIFF = np.log2(1.5) - 0.5
+
+    def process(self, sensitivity):
+        """Derive an RFI mask from sensitivity data.
+
+        Parameters
+        ----------
+        sensitivity : containers.SystemSensitivity
+            Sensitivity data to derive the RFI mask from.
+
+        Returns
+        -------
+        rfimask : containers.RFIMask
+            RFI mask derived from sensitivity.
+        """
+        # Divide sensitivity to get a radiometer test
+        radiometer = sensitivity.sigma[:] * invert_no_zero(sensitivity.estimate[:])
+        npol = radiometer.shape[1]
+        nfreq = radiometer.shape[0]
+        freq = sensitivity.freq
+        static_flag = rfi.frequency_mask(freq)
+
+        madmask, stmask = [], []
+        for ii in range(npol):
+            # Initial flag on weights equal to zero.
+            origflag = sensitivity.weight[:, ii] == 0.0
+            # Remove median at each frequency, if asked.
+            if self.remove_median:
+                for ff in range(nfreq):
+                    radiometer[ff, ii] -= np.median(radiometer[ff, ii][~origflag[ff]])
+            # Combine weights with static flag
+            start_flag = origflag | static_flag[:, None]
+            # Obtain MAD and TV masks
+            this_madmask, tvmask = self.mad_tv_mask(
+                radiometer[:, ii],
+                start_flag,
+                freq,
+                sigma=self.sigma,
+                tv_fraction=self.tv_fraction,
+            )
+            # combine MAD and TV masks
+            madmask.append(this_madmask | tvmask)
+
+            # Add TV channels to ST start flag.
+            start_flag = start_flag | tvmask
+            # Determine initial threshold
+            med = np.median(radiometer[:, ii][~start_flag])
+            mad = np.median(abs(radiometer[:, ii][~start_flag] - med))
+            rms = self.MADTORMS * mad
+            threshold1 = (
+                rms * self.start_threshold_sigma * self.max_m ** self.RMS_SCALING_DIFF
+            )
+
+            # SUMTHRESHOLD mask
+            stmask.append(
+                dracorfi.sumthreshold(
+                    radiometer[:, ii],
+                    self.max_m,
+                    start_flag=start_flag,
+                    threshold1=threshold1,
+                    correct_for_missing=True,
+                )
+            )
+
+        # Combine two polarization flags
+        madmask = np.logical_or(madmask[0], madmask[1])
+        stmask = np.logical_or(stmask[0], stmask[1])
+
+        if self.mask_type == "mad":
+            finalmask = madmask
+        elif self.mask_type == "sumthreshold":
+            finalmask = stmask
+        else:  # Combine ST and MAD masks
+            sidereal_day = ephemeris.SIDEREAL_S * 24 * 3600
+            timestamp = sensitivity.time
+            ntm = len(timestamp)
+            start_csd = ephemeris.unix_to_csd(timestamp[0])
+            start_ra = (start_csd - int(start_csd)) * (2.0 * np.pi)
+            ra_axis = (start_ra + (2.0 * np.pi) / ntm * np.arange(ntm)) % (2.0 * np.pi)
+            # Select Sun transit times
+            suntt = ephemeris.solar_transit(timestamp[0])  # Sun transit time
+            sunidx = np.argmin(abs(timestamp - suntt))
+            beam_window = (
+                2.0 * np.pi
+            ) / 90.0  # 4 deg in radians for the Sun. Each side.
+            # Mask the sun for the maximum aparent dec of ~24 deg
+            ra_window = beam_window / np.cos(np.deg2rad(24))
+            time_window = ra_window / (2 * np.pi) * sidereal_day
+            # Time spans where we apply the MAD filter.
+            madtimes = abs(timestamp - suntt) < time_window
+            # Select bright source transit times. Only CasA, CygA and TauA.
+            sources = [ephemeris.CasA, ephemeris.CygA, ephemeris.TauA]
+            # , ephemeris.VirA]
+            for src in sources:
+                src_ra = src.ra.radians
+                src_idx = np.argmin(abs(ra_axis - src_ra))
+                ra_window = beam_window / np.cos(src.dec.radians)
+                time_window = ra_window / (2 * np.pi) * sidereal_day
+                # Include bright point source transit in MAD times
+                madtimes += abs(timestamp - timestamp[src_idx]) < time_window
+            # Create final mask
+            finalmask = stmask
+            finalmask[:, madtimes] = madmask[:, madtimes]
+
+        # Apply scale invariant rank (SIR) operator, if asked for.
+        if self.sir:
+            finalmask = self.add_sir(finalmask, static_flag)
+
+        # Create container to hold mask
+        rfimask = containers.RFIMask(axes_from=sensitivity)
+        rfimask.mask[:] = finalmask
+
+        return rfimask
+
+    def add_sir(self, mask, baseflag, eta=0.2):
+        # Remove baseflag from mask and run SIR
+        nobaseflag = np.copy(mask)
+        nobaseflag[baseflag] = False
+        nobaseflagsir = rfi.sir(nobaseflag[:, np.newaxis, :], eta=eta)[:, 0, :]
+        # Make sure the original mask (including baseflag) is still masked
+        flagsir = nobaseflagsir | mask
+        return flagsir
+
+    def mad_tv_mask(
+        self,
+        data,
+        start_flag,
+        freq,
+        sigma=5.0,
+        tv_fraction=0.5,
+        base_size=(11, 3),
+        mad_size=(201, 51),
+    ):
+        # Make copy of data
+        data = np.copy(data)
+        # Calculate the scaled deviations
+        data[start_flag] = 0.0
+        maddev = mad(data, start_flag, base_size=base_size, mad_size=mad_size)
+        # Replace any NaNs (where too much data is missing) with a
+        # large enough value to always be flagged
+        maddev = np.where(np.isnan(maddev), 2 * sigma, maddev)
+        # Reflag for scattered TV emission
+        tvmask = tv_channels_flag(maddev, freq, sigma=sigma, f=tv_fraction)
+        # Create MAD mask
+        madmask = maddev > sigma
+        # Ensure start flag is masked
+        madmask = madmask | start_flag
+
+        return madmask, tvmask
 
 
 class RFIMask(task.SingleTask):
